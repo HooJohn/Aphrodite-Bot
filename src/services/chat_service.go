@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"project/config"
 	"project/models"
+	"project/repository" // <<< ADDED IMPORT
 	"strings"
 	// "time"
 
@@ -38,10 +39,12 @@ type ChatRequest struct {
 	// ResponseCallback func(string) // 当前未使用
 }
 
-type chatService struct{}
+type chatService struct {
+	chatRepo repository.ChatRepository // <<< ADDED FIELD
+}
 
-func NewChatService() ChatService {
-	return &chatService{}
+func NewChatService(chatRepo repository.ChatRepository) ChatService { // <<< MODIFIED PARAMETER
+	return &chatService{chatRepo: chatRepo} // <<< INITIALIZE FIELD
 }
 
 func (s *chatService) ProcessMessageStream(
@@ -52,12 +55,24 @@ func (s *chatService) ProcessMessageStream(
 ) (string, error) {
 
 	providerKey, modelExists := config.AppConfig.LLMModels[req.Model]
-	if !modelExists { /* ... 错误处理 ... */ return "", errors.New("model not found") }
+	if !modelExists {
+		errMsg := fmt.Sprintf("model '%s' not found in LLMModels configuration", req.Model)
+		log.Printf("ERROR: [ChatService] ProcessMessageStream: %s", errMsg)
+		return "", errors.New(errMsg) // Or a more specific error type
+	}
 	providerConfig, providerExists := config.AppConfig.LLMProviders[providerKey]
-	if !providerExists { /* ... 错误处理 ... */ return "", errors.New("provider not found") }
+	if !providerExists {
+		errMsg := fmt.Sprintf("provider key '%s' for model '%s' not found in LLMProviders configuration", providerKey, req.Model)
+		log.Printf("ERROR: [ChatService] ProcessMessageStream: %s", errMsg)
+		return "", errors.New(errMsg)
+	}
 	apiKey := providerConfig.APIKey
 	baseURL := providerConfig.BaseURL
-	if apiKey == "" || baseURL == "" { /* ... 错误处理 ... */ return "", errors.New("api key or baseurl empty") }
+	if apiKey == "" || baseURL == "" {
+		errMsg := fmt.Sprintf("API key or BaseURL is empty for provider '%s' (model '%s')", providerKey, req.Model)
+		log.Printf("ERROR: [ChatService] ProcessMessageStream: %s", errMsg)
+		return "", errors.New(errMsg)
+	}
 
 	oclient := openai.DefaultConfig(apiKey)
 	oclient.BaseURL = baseURL
@@ -77,16 +92,16 @@ func (s *chatService) ProcessMessageStream(
 
 	var llmMessages []openai.ChatCompletionMessage
 	if systemPrompt != "" {
-		log.Printf("为AI '%s' 构建的System Prompt: %.100s...", req.AIName, systemPrompt)
+		log.Printf("INFO: [ChatService] Building System Prompt for AI '%s': %.100s...", req.AIName, systemPrompt)
 		llmMessages = append(llmMessages, openai.ChatCompletionMessage{
 			Role: openai.ChatMessageRoleSystem, Content: systemPrompt,
 		})
 	}
 
 	if additionalContextHeader != "" {
-		log.Printf("为AI '%s' 注入额外上下文头部: %.100s...", req.AIName, additionalContextHeader)
+		log.Printf("INFO: [ChatService] Injecting additional context header for AI '%s': %.100s...", req.AIName, additionalContextHeader)
 		llmMessages = append(llmMessages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant, // 作为AI接收到的任务指令
+			Role:    openai.ChatMessageRoleAssistant, // As AI's received task instruction
 			Content: additionalContextHeader,
 		})
 	}
@@ -132,16 +147,17 @@ func (s *chatService) ProcessMessageStream(
 	}
 
 	stream, err := client.CreateChatCompletionStream(ctx, chatAPIReq)
-	if err != nil { /* ... 错误处理并返回 ... */ 
-	    log.Printf("错误: CreateChatCompletionStream 失败 for model %s: %v", req.Model, err)
-	    return "", fmt.Errorf("AI服务暂时不可用 (%s): %w", req.AIName, err)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to create chat completion stream for model %s (AI: %s, UserID: %s)", req.Model, req.AIName, req.UserID)
+		log.Printf("ERROR: [ChatService] %s: %v", errMsg, err)
+		return "", fmt.Errorf("%s: %w", errMsg, err)
 	}
 	defer stream.Close()
 
 	var fullResponseContent strings.Builder
-	var streamErr error
+	var streamErr error // To store errors encountered during streaming
 
-	writer.Header().Set("Content-Type", "text/event-stream") // 确保SSE头在这里设置
+	writer.Header().Set("Content-Type", "text/event-stream") // Ensure SSE header is set here
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
 	// writer.Flush() // 第一次 flush 应该在有数据时
@@ -151,13 +167,13 @@ func (s *chatService) ProcessMessageStream(
 	for {
 		response, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
-			log.Printf("AI '%s' 流式响应结束.", req.AIName)
+			log.Printf("INFO: [ChatService] Stream ended for AI '%s', UserID '%s'.", req.AIName, req.UserID)
 			break
 		}
 		if recvErr != nil {
-			streamErr = fmt.Errorf("从流中接收响应失败 for AI %s: %w", req.AIName, recvErr)
-			log.Println("错误:", streamErr)
-			break
+			streamErr = fmt.Errorf("failed to receive from stream for AI %s (UserID: %s): %w", req.AIName, req.UserID, recvErr)
+			log.Printf("ERROR: [ChatService] %v", streamErr)
+			break // Critical stream error, stop processing
 		}
 
 		if len(response.Choices) > 0 {
@@ -165,47 +181,52 @@ func (s *chatService) ProcessMessageStream(
 			if content != "" {
 				fullResponseContent.WriteString(content)
 				
-				// 确保 JSON 字符串正确性
 				escapedContent := strings.ReplaceAll(content, "\\", "\\\\")
 				escapedContent = strings.ReplaceAll(escapedContent, "\"", "\\\"")
 				escapedContent = strings.ReplaceAll(escapedContent, "\n", "\\n")
-
-				// ai_name 已包含在 ChatHandler 返回的 SSE 结构中，这里可以简化
-				// 或者，如果希望每个delta都带ai_name:
-				// data := fmt.Sprintf("data: {\"content\": \"%s\", \"ai_name\": \"%s\"}\n\n", escapedContent, req.AIName)
 				data := fmt.Sprintf("data: {\"content\": \"%s\"}\n\n", escapedContent)
 
-
 				if _, writeErr := writer.Write([]byte(data)); writeErr != nil {
-					streamErr = fmt.Errorf("写入SSE数据到客户端失败: %w", writeErr)
-					log.Println("错误:", streamErr)
-					break
+					streamErr = fmt.Errorf("failed to write SSE data to client for AI %s (UserID: %s): %w", req.AIName, req.UserID, writeErr)
+					log.Printf("ERROR: [ChatService] %v", streamErr)
+					break // Client connection likely lost
 				}
 				if flusher, ok := writer.(http.Flusher); ok {
 					flusher.Flush()
 					initialFlushDone = true
-				} else if !initialFlushDone { // 如果不支持flusher，至少在第一次数据后尝试flush header
-				    // (Gin通常会自动处理，但显式一点无害)
-				    // http.ResponseWriter 本身没有 Flush()，依赖 http.Flusher 类型断言
-				    log.Println("警告: ResponseWriter 不支持 Flusher")
-				    initialFlushDone = true // 避免重复打印日志
+				} else if !initialFlushDone {
+				    log.Printf("WARN: [ChatService] ResponseWriter does not support Flusher for AI '%s', UserID '%s'. SSE might be buffered.", req.AIName, req.UserID)
+				    initialFlushDone = true 
 				}
 			}
 		}
 	}
 
-	if streamErr != nil {
-		// 即使流出错，也返回已收集到的部分内容，上层可能仍需保存或记录
-		return fullResponseContent.String(), streamErr
-	}
+	// If streamErr occurred, it's logged above. The function returns the content accumulated so far, and the error.
+	// The handler (ChatHandler) should be aware that the stream might have been partial.
+	// No specific action for streamErr here, as it's returned.
 
 	finalReply := fullResponseContent.String()
-	log.Printf("AI '%s' 生成的完整回复 (ChatService): %.100s...", req.AIName, finalReply)
-	return finalReply, nil
+	if streamErr != nil {
+		log.Printf("WARN: [ChatService] AI '%s' (UserID: %s) stream completed with error. Partial reply length: %d. Error: %v", req.AIName, req.UserID, len(finalReply), streamErr)
+	} else {
+		log.Printf("INFO: [ChatService] AI '%s' (UserID: %s) generated full reply. Length: %d. Preview: %.100s...", req.AIName, req.UserID, len(finalReply), finalReply)
+	}
+	return finalReply, streamErr // Return accumulated content and any stream error
 }
 
 func (s *chatService) GetChatHistory(userID string) ([]models.ChatMessage, error) {
-	// ChatService 当前不直接管理 repo，此方法应由 ChatHandler 调用 repo 实现
-	// 或者 NewChatService 时注入 repo 实例
-	return nil, errors.New("ChatService.GetChatHistory: repository not injected or not intended for direct use here")
+	log.Printf("INFO: [ChatService] GetChatHistory called for userID: %s", userID)
+	if s.chatRepo == nil {
+		log.Printf("ERROR: [ChatService] chatRepo is nil. Ensure NewChatService was called with a valid repository.")
+		return nil, errors.New("chat service internal error: repository not initialized")
+	}
+	messages, err := s.chatRepo.GetMessagesByUserID(userID)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to get chat history for userID %s from repository", userID)
+		log.Printf("ERROR: [ChatService] %s: %v", errMsg, err)
+		return nil, fmt.Errorf("%s: %w", errMsg, err)
+	}
+	log.Printf("INFO: [ChatService] Successfully retrieved %d messages for userID %s from repository", len(messages), userID)
+	return messages, nil
 }

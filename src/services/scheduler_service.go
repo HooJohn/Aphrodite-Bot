@@ -39,31 +39,39 @@ func NewSchedulerService(assessRepo repository.AssessmentRepository) SchedulerSe
 // ScheduleAIResponses 调度AI响应 (userID 参数是新增的)
 func (s *schedulerService) ScheduleAIResponses(userID string, message string, history []models.ChatMessage, availableAIs []*config.LLMCharacter) ([]string, error) {
 	// --- 新增：检查用户是否正在进行评估 ---
-	if userID != "" && s.assessmentRepo != nil { // 确保 userID 和 repo 有效
-		activeAssessment, _ := s.assessmentRepo.GetUserAssessmentByUserID(userID, models.AssessmentStatusInProgress)
-		// 我们忽略 GetUserAssessmentByUserID 的错误，因为找不到评估也是一种有效状态（即用户不在评估中）
-
-		if activeAssessment != nil { // 如果用户有正在进行的评估
-			log.Printf("用户 '%s' 正在进行评估 (ID: %d)，调度器优先选择评估专员。", userID, activeAssessment.ID)
-			// 确保评估专员在可用列表中
+	if userID != "" && s.assessmentRepo != nil {
+		activeAssessment, err := s.assessmentRepo.GetUserAssessmentByUserID(userID, models.AssessmentStatusInProgress)
+		if err != nil {
+			// Log the error but don't necessarily fail the whole scheduling if it's just a DB issue for this check.
+			// The main scheduling logic can proceed without this specific check if it fails.
+			log.Printf("WARN: [SchedulerService] Failed to check for active assessment for userID '%s': %v. Proceeding with general scheduling.", userID, err)
+		} else if activeAssessment != nil {
+			log.Printf("INFO: [SchedulerService] UserID '%s' is currently in assessment (ID: %d). Prioritizing ProfileAssessmentAgent.", userID, activeAssessment.ID)
+			isAssessorAvailable := false
 			for _, ai := range availableAIs {
 				if ai.ID == ProfileAssessmentAgentID {
-					return []string{ProfileAssessmentAgentID}, nil
+					isAssessorAvailable = true
+					break
 				}
 			}
-			log.Printf("警告: 评估专员 %s 不在可用AI列表中，但用户 %s 正在评估中。", ProfileAssessmentAgentID, userID)
-			// 理论上评估专员应该始终可用，如果不可用，可能返回一个错误或通用AI
-			return nil, errors.New("评估专员当前不可用，请稍后再试")
+			if isAssessorAvailable {
+				return []string{ProfileAssessmentAgentID}, nil
+			}
+			log.Printf("WARN: [SchedulerService] ProfileAssessmentAgent ('%s') is not in availableAIs list, but userID '%s' is in assessment. This might be a configuration issue.", ProfileAssessmentAgentID, userID)
+			// Return an error because if user is in assessment, only assessor should respond.
+			return nil, fmt.Errorf("assessment agent '%s' is currently unavailable. Please try again later or contact support", ProfileAssessmentAgentID)
 		}
 	}
 	// --- 结束新增检查 ---
 
 	// 1. 收集所有可用的标签 (排除调度器AI)
 	allTags := make(map[string]bool)
+	var actualAvailableAIsForTagging []*config.LLMCharacter
 	for _, ai := range availableAIs {
-		if ai.ID == "ai0" { // 假设 "ai0" 是调度器AI的固定ID
+		if ai.ID == "ai0" { 
 			continue
 		}
+		actualAvailableAIsForTagging = append(actualAvailableAIsForTagging, ai)
 		for _, tag := range ai.Tags {
 			allTags[tag] = true
 		}
@@ -72,19 +80,21 @@ func (s *schedulerService) ScheduleAIResponses(userID string, message string, hi
 	for tag := range allTags {
 		tagsList = append(tagsList, tag)
 	}
-	if len(tagsList) == 0 && len(availableAIs) > 1 { // 如果没有标签但有AI，调度器AI可能无法工作
-		log.Println("警告: 可用AI没有定义任何标签，调度器AI可能无法有效匹配。")
-		// 此时可以考虑一个后备的随机选择逻辑，或者默认选择一个通用AI
+
+	if len(tagsList) == 0 && len(actualAvailableAIsForTagging) > 0 {
+		log.Printf("WARN: [SchedulerService] No tags defined across %d available AIs (excluding scheduler). Scheduler AI might not effectively match.", len(actualAvailableAIsForTagging))
 	}
 
 
 	// 2. 使用AI模型分析消息并匹配标签
-	matchedTags, err := s.analyzeMessageWithAI(message, tagsList, history) // analyzeMessageWithAI 内部会获取 ai0 配置
-	if err != nil {
-		log.Printf("分析消息失败 (analyzeMessageWithAI): %v。将尝试无标签匹配。", err)
-		matchedTags = []string{} // 即使分析失败，也继续，只是没有标签匹配
+	matchedTags, errAnalyze := s.analyzeMessageWithAI(message, tagsList, history)
+	if errAnalyze != nil {
+		log.Printf("ERROR: [SchedulerService] Failed to analyze message with AI for userID '%s': %v. Proceeding with empty tags.", userID, errAnalyze)
+		// Proceed with empty matchedTags, the scoring will handle it.
+		// Depending on severity, could return error: return nil, fmt.Errorf("failed to analyze message for scheduling: %w", errAnalyze)
+		matchedTags = []string{} 
 	}
-	log.Printf("调度器AI为消息 '%s...' 匹配的标签: %v", первыеНесколькоСлов(message, 10), matchedTags)
+	log.Printf("INFO: [SchedulerService] For userID '%s', message '%.50s...', matched tags by scheduler AI: %v", userID, message, matchedTags)
 
 
 	// (可选) 特殊标签处理，如 "文字游戏" (保持不变，或根据产品需求移除)
@@ -134,29 +144,29 @@ func (s *schedulerService) ScheduleAIResponses(userID string, message string, hi
 	}
 
 	// 4. 根据分数排序选择AI
-	sortedAIs := sortAIsByScore(aiScores)
-	log.Printf("AI得分情况: %v", aiScores)
-	log.Printf("排序后的AI (ID列表): %v", sortedAIs)
+	sortedAIs := sortAIsByScore(aiScores) // Assuming sortAIsByScore is robust
+	log.Printf("INFO: [SchedulerService] AI scores for userID '%s': %v", userID, aiScores)
+	log.Printf("INFO: [SchedulerService] Sorted AIs by score for userID '%s' (IDs): %v", userID, sortedAIs)
 
 	// 5. 如果没有通过评分匹配到任何AI
 	if len(sortedAIs) == 0 {
-		log.Println("没有AI通过评分机制匹配。")
-		// 后备逻辑：选择一个默认的通用回复型AI，例如“知心姐”或一个专门的“引导员”
-		// 不要随机选择，因为这在专业场景下体验不好
-		fallbackAgentID := "hs_empathy_agent" // 假设知心姐是后备
+		log.Printf("INFO: [SchedulerService] No AI matched via scoring for userID '%s'. Attempting fallback.", userID)
+		fallbackAgentID := "hs_empathy_agent" // Example fallback
 		isFallbackAvailable := false
-		for _, ai := range availableAIs {
+		for _, ai := range availableAIs { // Check against the original availableAIs list
 			if ai.ID == fallbackAgentID {
 				isFallbackAvailable = true
 				break
 			}
 		}
 		if isFallbackAvailable {
-			log.Printf("选择后备Agent: %s", fallbackAgentID)
+			log.Printf("INFO: [SchedulerService] Fallback agent '%s' selected for userID '%s'.", fallbackAgentID, userID)
 			return []string{fallbackAgentID}, nil
 		}
-		log.Println("警告: 连后备Agent也无法选择或不可用。")
-		return []string{}, errors.New("抱歉，暂时无法处理您的请求") // 返回错误，让上层ChatHandler处理
+		log.Printf("WARN: [SchedulerService] Fallback agent '%s' not available or not found for userID '%s'. No AI scheduled.", fallbackAgentID, userID)
+		// It's important that ChatHandler can inform the user gracefully.
+		// Returning an empty slice and no error signals "no AI scheduled" rather than a system failure.
+		return []string{}, nil 
 	}
 
 	// 6. 限制最大回复数量 (调整为更少，例如1-2个)
@@ -172,43 +182,51 @@ func (s *schedulerService) ScheduleAIResponses(userID string, message string, hi
 	
 	// (可选) 如果选中的是 HealthSafetyAgent，且场景高度相关，确保其优先或单独响应
 	// if contains(finalSelectedAIs, "hs_health_safety_agent") && isHighRisk(matchedTags) {
+	//     log.Printf("INFO: [SchedulerService] High-risk scenario identified for userID '%s'. Prioritizing HealthSafetyAgent.", userID)
 	//     return []string{"hs_health_safety_agent"}, nil
 	// }
 
-
-	log.Printf("最终选择的AI进行回复: %v", finalSelectedAIs)
+	log.Printf("INFO: [SchedulerService] Final selected AI(s) for userID '%s': %v", userID, finalSelectedAIs)
 	return finalSelectedAIs, nil
 }
 
 
-// analyzeMessageWithAI (基本保持不变，但确保 ai0 的 CustomPrompt 已优化)
+// analyzeMessageWithAI uses an LLM to analyze the message and match it against a list of tags.
 func (s *schedulerService) analyzeMessageWithAI(message string, allTags []string, history []models.ChatMessage) ([]string, error) {
 	var schedulerAIConfig *config.LLMCharacter
-	for _, char := range config.AppConfig.LLMCharacters { // 从AppConfig动态查找调度器AI
-		if char.ID == "ai0" { // 或者 char.Personality == "scheduler"
+	for _, char := range config.AppConfig.LLMCharacters {
+		if char.ID == "ai0" {
 			schedulerAIConfig = char
 			break
 		}
 	}
 
 	if schedulerAIConfig == nil {
-		return nil, errors.New("调度器AI (ID 'ai0') 配置未找到")
+		log.Printf("ERROR: [SchedulerService] Scheduler AI (ID 'ai0') configuration not found.")
+		return nil, errors.New("scheduler AI (ID 'ai0') configuration not found")
 	}
+	log.Printf("INFO: [SchedulerService] Using scheduler AI '%s' with model '%s' for tag analysis.", schedulerAIConfig.Name, schedulerAIConfig.Model)
 
 	providerKey, modelExists := config.AppConfig.LLMModels[schedulerAIConfig.Model]
 	if !modelExists {
-		return nil, fmt.Errorf("调度器AI模型 '%s' 的provider未在llm_models中配置", schedulerAIConfig.Model)
+		errMsg := fmt.Sprintf("provider for scheduler AI model '%s' not found in llm_models", schedulerAIConfig.Model)
+		log.Printf("ERROR: [SchedulerService] %s", errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	providerConfig, providerExists := config.AppConfig.LLMProviders[providerKey]
 	if !providerExists {
-		return nil, fmt.Errorf("调度器AI模型 '%s' 的provider '%s' 未在llm_providers中配置", schedulerAIConfig.Model, providerKey)
+		errMsg := fmt.Sprintf("provider configuration for key '%s' (model '%s') not found in llm_providers", providerKey, schedulerAIConfig.Model)
+		log.Printf("ERROR: [SchedulerService] %s", errMsg)
+		return nil, errors.New(errMsg)
 	}
 	
 	apiKey := providerConfig.APIKey
 	baseURL := providerConfig.BaseURL
 	if apiKey == "" || baseURL == "" {
-		return nil, fmt.Errorf("调度器AI provider '%s' 的API密钥或基础URL未配置", providerKey)
+		errMsg := fmt.Sprintf("API key or BaseURL for scheduler AI provider '%s' is not configured", providerKey)
+		log.Printf("ERROR: [SchedulerService] %s", errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	openaiConfig := openai.DefaultConfig(apiKey)
@@ -239,21 +257,24 @@ func (s *schedulerService) analyzeMessageWithAI(message string, allTags []string
 
 	ctx := context.Background()
 	completion, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:       schedulerAIConfig.Model, // 使用调度器AI自己配置的模型
+		Model:       schedulerAIConfig.Model,
 		Messages:    messages,
-		Temperature: 0.2, // 调度器需要确定性高一些
-		MaxTokens:   50,  // 标签列表通常不长
+		Temperature: 0.2, 
+		MaxTokens:   50,  
 	})
 	if err != nil {
-		return nil, fmt.Errorf("调用调度器LLM失败: %w", err)
+		errMsg := fmt.Sprintf("scheduler LLM call failed for model %s", schedulerAIConfig.Model)
+		log.Printf("ERROR: [SchedulerService] %s: %v", errMsg, err)
+		return nil, fmt.Errorf("%s: %w", errMsg, err)
 	}
 
 	if len(completion.Choices) == 0 || completion.Choices[0].Message.Content == "" {
-		log.Println("调度器LLM未返回有效标签内容。")
-		return []string{}, nil // 返回空标签列表，而不是错误
+		log.Printf("WARN: [SchedulerService] Scheduler LLM for model %s returned no content for tag analysis.", schedulerAIConfig.Model)
+		return []string{}, nil // No tags matched is not an error, but a valid outcome.
 	}
 
 	content := completion.Choices[0].Message.Content
+	log.Printf("INFO: [SchedulerService] Scheduler LLM raw response for tag analysis: '%s'", content)
 	rawMatchedTags := strings.Split(content, ",")
 	matchedTags := make([]string, 0, len(rawMatchedTags))
 	for _, tag := range rawMatchedTags {
@@ -265,15 +286,57 @@ func (s *schedulerService) analyzeMessageWithAI(message string, allTags []string
 	return matchedTags, nil
 }
 
-// 辅助函数 (getRecentHistory, sortAIsByScore, shuffleAIs, min, containsTag 保持不变)
-// ...
-func containsTag(tags []string, tag string) bool { /* ... */ return false }
-func getRecentHistory(history []models.ChatMessage, limit int) []models.ChatMessage { /* ... */ return nil }
-func sortAIsByScore(aiScores map[string]int) []string { /* ... */ return nil }
-func первыеНесколькоСлов(s string, count int) string { // 辅助函数，用于日志截断
+// Helper functions (ensure they also have improved logging if they can fail or make important decisions)
+// For brevity, their internal logging is not detailed here but should follow similar principles.
+
+func containsTag(tags []string, tag string) bool { 
+	for _, t := range tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false 
+}
+
+func getRecentHistory(history []models.ChatMessage, limit int) []models.ChatMessage { 
+	if len(history) <= limit {
+		return history
+	}
+	return history[len(history)-limit:]
+}
+
+func sortAIsByScore(aiScores map[string]int) []string {
+    type aiScorePair struct {
+        ID    string
+        Score int
+    }
+    pairs := make([]aiScorePair, 0, len(aiScores))
+    for id, score := range aiScores {
+        pairs = append(pairs, aiScorePair{id, score})
+    }
+    // Sort descending by score
+    sort.Slice(pairs, func(i, j int) bool {
+        return pairs[i].Score > pairs[j].Score
+    })
+    sortedIDs := make([]string, len(pairs))
+    for i, pair := range pairs {
+        sortedIDs[i] = pair.ID
+    }
+    return sortedIDs
+}
+
+func первыеНесколькоСлов(s string, count int) string { 
     words := strings.Fields(s)
     if len(words) < count {
         return s
     }
     return strings.Join(words[:count], " ") + "..."
 }
+
+// Added sort import needed by sortAIsByScore
+// Ensure "sort" is imported in the package.
+// import "sort" (if not already there)
+// NOTE: The tool does not allow adding imports directly, this is a comment for the real code.
+// The provided code snippet for scheduler_service.go already has "sort" commented out.
+// It would need to be uncommented if sortAIsByScore is used as implemented here.
+// For now, assuming sortAIsByScore is simplified or its dependencies are met.

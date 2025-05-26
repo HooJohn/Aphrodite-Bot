@@ -11,126 +11,132 @@ import (
 	"strings"
 )
 
-// AssessmentService 评估服务接口 (保持不变)
+// AssessmentService defines the interface for assessment-related operations.
 type AssessmentService interface {
 	StartOrContinueAssessment(userID string) (question *models.AssessmentQuestion, assessment *models.UserAssessment, userVisibleError error)
 	SubmitAnswer(userID string, questionID string, answerValues []string) (question *models.AssessmentQuestion, assessment *models.UserAssessment, userVisibleError error)
 	GetAssessmentResult(userID string) (*models.UserAssessment, error)
 }
 
-// assessmentService 评估服务实现
+// assessmentService implements the AssessmentService interface.
 type assessmentService struct {
 	repo          repository.AssessmentRepository
-	questions     []models.AssessmentQuestion          // 有序问题列表
-	questionsByID map[string]*models.AssessmentQuestion // 按ID快速查找问题指针
+	questions     []models.AssessmentQuestion          // Ordered list of assessment questions
+	questionsByID map[string]*models.AssessmentQuestion // Quick lookup for questions by ID
 }
 
-// NewAssessmentService 创建评估服务实例
+// NewAssessmentService creates a new instance of AssessmentService.
 func NewAssessmentService(repo repository.AssessmentRepository) AssessmentService {
-	definedQuestions := getDefaultAssessmentQuestions() // 从辅助函数获取问题定义
+	definedQuestions := getDefaultAssessmentQuestions() // Get question definitions from helper
 
-	sort.Slice(definedQuestions, func(i, j int) bool { // 确保问题按Order排序
+	// Ensure questions are sorted by their Order field
+	sort.Slice(definedQuestions, func(i, j int) bool {
 		return definedQuestions[i].Order < definedQuestions[j].Order
 	})
 
 	questionsMap := make(map[string]*models.AssessmentQuestion)
-	tempQuestions := make([]models.AssessmentQuestion, len(definedQuestions)) // 创建副本以存储指针
-	for i, q := range definedQuestions {
-		// 为 questionsByID 存储指针，这样 s.questions 中的修改会同步（虽然这里是只读）
-		// 或者，直接让 s.questions 存储指针类型 []*models.AssessmentQuestion
-		// 为了简单，这里我们让 s.questions 存储值类型，s.questionsByID 存储指针
-		// 但更好的做法可能是让 s.questions 也是 []*models.AssessmentQuestion
-		// 这里我们先复制一份到 tempQuestions，然后取地址
-		tempQuestions[i] = q 
-		questionsMap[q.ID] = &tempQuestions[i]
+	// Create a stable copy of questions to store pointers to, for questionsByID map.
+	questionStore := make([]models.AssessmentQuestion, len(definedQuestions))
+	copy(questionStore, definedQuestions)
+
+	for i := range questionStore {
+		questionsMap[questionStore[i].ID] = &questionStore[i]
 	}
 	
 	return &assessmentService{
 		repo:          repo,
-		questions:     definedQuestions, // 存储值类型的问题列表
-		questionsByID: questionsMap,     // 存储指向临时副本中元素的指针
+		questions:     definedQuestions, 
+		questionsByID: questionsMap,     
 	}
 }
 
-// getDefaultAssessmentQuestions (保持不变，内容已在之前提供)
+// getDefaultAssessmentQuestions defines the set of questions for the assessment.
+// Note: These are currently hardcoded. In a more dynamic system, they might come from a DB or config file.
 func getDefaultAssessmentQuestions() []models.AssessmentQuestion {
-    // ... (返回我们定义的问题列表)
+	// Comments for each question detailing its purpose and options.
 	return []models.AssessmentQuestion{
-		{ID: "q_welcome", Order: 0, Text: "您好！为了给您提供更个性化的服务，我们需要了解一些您的基本情况。整个过程大约需要5-10分钟，您的数据将被严格保密。您准备好开始了吗？", QuestionType: models.QuestionTypeConfirmation, Options: []string{"是的，我准备好了", "不了，下次吧"}, IsRequired:   true},
-		{ID: "q_age_group", Order: 1, Text: "您的年龄段是？", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"18-24岁", "25-34岁", "35-44岁", "45-54岁", "55岁及以上"}, IsRequired: true},
-		{ID: "q_chronic_diseases", Order: 2, Text: "您是否有医生诊断过的慢性疾病（如高血压、糖尿病、心脏病等）？如果有，请简要说明，如无可填写“无”。", QuestionType: models.QuestionTypeOpenText, IsRequired: true},
-		{ID: "q_medications", Order: 3, Text: "您目前是否正在长期服用任何处方药？如果是，请简要说明药品名称或类型，如无可填写“无”。", QuestionType: models.QuestionTypeOpenText, IsRequired: true},
-		{ID: "q_exercise_habits", Order: 4, Text: "您目前的运动频率如何？", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"几乎不运动", "每周1-2次", "每周3-4次", "每周5次及以上"}, IsRequired: true},
-		{ID: "q_sleep_quality", Order: 5, Text: "您通常的睡眠质量如何？", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"很好，能保证7-8小时且精力充沛", "一般，偶尔睡眠不足或质量不高", "较差，经常失眠或睡眠质量差"}, IsRequired: true},
-		{ID: "q_stress_level", Order: 6, Text: "您感觉自己目前的整体压力水平如何？（1为极低，5为极高）", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"1 (极低)", "2 (较低)", "3 (中等)", "4 (较高)", "5 (极高)"}, IsRequired: true},
-		{ID: "q_sex_frequency_satisfaction", Order: 7, Text: "您对目前的性生活频率满意吗？", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"非常满意", "比较满意", "一般", "不太满意", "非常不满意", "目前没有性生活"}, IsRequired: true},
-		{ID: "q_sex_ability_concerns", Order: 8, Text: "在性能力方面（如勃起、持久度、性欲等），您目前主要有哪些困惑或担忧？（多选，如无困惑可选择“无明显困惑”）", QuestionType: models.QuestionTypeMultiChoice, Options: []string{"勃起困难或维持时间短", "早泄或持久度不足", "性欲低下", "高潮困难", "性交疼痛", "对自身表现焦虑", "缺乏性知识或技巧", "无明显困惑"}, IsRequired: true},
-		{ID: "q_main_goals", Order: 9, Text: "通过我们的AI伙伴，您最希望达成的核心目标是什么？（多选）", QuestionType: models.QuestionTypeMultiChoice, Options: []string{"获取科学的性健康知识", "提升性能力（如持久度、硬度）", "改善与伴侣的性沟通", "调整不健康的性习惯", "缓解性焦虑或压力", "制定个性化的锻炼计划", "了解并尝试健康的性行为模式"}, IsRequired: true},
-		{ID: "q_privacy_consent", Order: 10, Text: "我们再次强调，您的所有回答都将被严格保密，仅用于为您提供个性化的健康建议和计划。您是否同意我们处理您的这些信息？", QuestionType: models.QuestionTypeConfirmation, Options: []string{"我同意并继续", "我不同意"}, IsRequired: true},
+		// Welcome and consent to start assessment
+		{ID: "q_welcome", Order: 0, Text: "Hello! To provide you with more personalized services, we need to understand some of your basic information. The whole process will take about 5-10 minutes, and your data will be kept strictly confidential. Are you ready to start?", QuestionType: models.QuestionTypeConfirmation, Options: []string{"Yes, I'm ready", "No, next time"}, IsRequired: true},
+		// Demographics
+		{ID: "q_age_group", Order: 1, Text: "What is your age group?", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"18-24 years", "25-34 years", "35-44 years", "45-54 years", "55 years and above"}, IsRequired: true},
+		// Health History
+		{ID: "q_chronic_diseases", Order: 2, Text: "Do you have any chronic diseases diagnosed by a doctor (e.g., hypertension, diabetes, heart disease)? If yes, please briefly explain. If no, you can write 'None'.", QuestionType: models.QuestionTypeOpenText, IsRequired: true},
+		{ID: "q_medications", Order: 3, Text: "Are you currently taking any long-term prescription medications? If yes, please briefly state the drug name or type. If no, you can write 'None'.", QuestionType: models.QuestionTypeOpenText, IsRequired: true},
+		// Lifestyle
+		{ID: "q_exercise_habits", Order: 4, Text: "How often do you currently exercise?", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"Almost never", "1-2 times a week", "3-4 times a week", "5 times a week or more"}, IsRequired: true},
+		{ID: "q_sleep_quality", Order: 5, Text: "How is your usual sleep quality?", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"Very good, can ensure 7-8 hours and feel energetic", "Average, occasionally insufficient sleep or poor quality", "Poor, often suffer from insomnia or poor sleep quality"}, IsRequired: true},
+		{ID: "q_stress_level", Order: 6, Text: "How would you rate your current overall stress level? (1 for extremely low, 5 for extremely high)", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"1 (Extremely Low)", "2 (Low)", "3 (Moderate)", "4 (High)", "5 (Extremely High)"}, IsRequired: true},
+		// Sexual Health Specifics
+		{ID: "q_sex_frequency_satisfaction", Order: 7, Text: "Are you satisfied with your current frequency of sexual activity?", QuestionType: models.QuestionTypeSingleChoice, Options: []string{"Very satisfied", "Somewhat satisfied", "Neutral", "Somewhat dissatisfied", "Very dissatisfied", "Currently no sexual activity"}, IsRequired: true},
+		{ID: "q_sex_ability_concerns", Order: 8, Text: "In terms of sexual ability (e.g., erection, stamina, libido), what are your main concerns or worries at present? (Multiple choice, select 'No significant concerns' if none)", QuestionType: models.QuestionTypeMultiChoice, Options: []string{"Difficulty achieving or maintaining an erection", "Premature ejaculation or insufficient stamina", "Low libido", "Difficulty reaching orgasm", "Pain during intercourse", "Anxiety about performance", "Lack of sexual knowledge or skills", "No significant concerns"}, IsRequired: true},
+		// Goals
+		{ID: "q_main_goals", Order: 9, Text: "What are the core goals you most hope to achieve with our AI partners? (Multiple choice)", QuestionType: models.QuestionTypeMultiChoice, Options: []string{"Gain scientific sexual health knowledge", "Improve sexual ability (e.g., stamina, hardness)", "Improve sexual communication with partner", "Adjust unhealthy sexual habits", "Relieve sexual anxiety or stress", "Develop a personalized exercise plan", "Understand and try healthy sexual behavior patterns"}, IsRequired: true},
+		// Final Consent
+		{ID: "q_privacy_consent", Order: 10, Text: "We reiterate that all your answers will be kept strictly confidential and used solely to provide you with personalized health advice and plans. Do you agree to our processing of this information?", QuestionType: models.QuestionTypeConfirmation, Options: []string{"I agree and continue", "I do not agree"}, IsRequired: true},
 	}
 }
 
-
-// StartOrContinueAssessment (逻辑已优化)
+// StartOrContinueAssessment finds an in-progress assessment for the user or starts a new one.
+// It returns the next question to be asked, the current state of the assessment, and any user-visible error.
 func (s *assessmentService) StartOrContinueAssessment(userID string) (*models.AssessmentQuestion, *models.UserAssessment, error) {
+	// Attempt to retrieve an existing in-progress assessment for the user.
 	assessment, err := s.repo.GetUserAssessmentByUserID(userID, models.AssessmentStatusInProgress)
-	if err != nil {
-		// 检查是否是“未找到进行中评估”的特定错误类型，如果是，则创建新的
-		// 这里依赖 repository 返回一个可识别的错误，或者更简单地，如果没有找到就返回 nil, nil
-		// 假设 GetUserAssessmentByUserID 在找不到时返回 (nil, nil) 或 (nil, specificError)
-		if assessment == nil { // 如果找不到进行中的评估 (或者 repo 返回 nil, nil)
-			log.Printf("未找到用户 '%s' 的进行中评估，将创建新评估。", userID)
-			newAssessment := &models.UserAssessment{
-				UserID:    userID,
-				Status:    models.AssessmentStatusInProgress,
-				StartedAt: time.Now(),
-				Answers:   make([]models.UserAnswer, 0),
-			}
-			assessment, err = s.repo.CreateUserAssessment(newAssessment)
-			if err != nil {
-				log.Printf("为用户 '%s' 创建新评估失败: %v", userID, err)
-				return nil, nil, errors.New("开始新评估失败，请稍后再试")
-			}
-			log.Printf("为用户 '%s' 创建新评估成功，ID: %d", userID, assessment.ID)
-			// 新评估，CurrentQuestionID 为空，将从第一个问题开始
-		} else { // 获取评估时发生其他错误
-			log.Printf("获取用户 '%s' 的进行中评估失败: %v", userID, err)
-			return nil, nil, errors.New("获取评估信息失败，请稍后再试")
+	if err != nil { 
+		errMsg := fmt.Sprintf("failed to get in-progress assessment for userID %s", userID)
+		log.Printf("ERROR: [AssessmentService] %s: %v", errMsg, err)
+		return nil, nil, fmt.Errorf("%s: %w", errMsg, err) 
+	}
+	
+	if assessment == nil { // No in-progress assessment found, create a new one.
+		log.Printf("INFO: [AssessmentService] No in-progress assessment found for userID '%s', creating a new one.", userID)
+		newAssessment := &models.UserAssessment{
+			UserID:    userID,
+			Status:    models.AssessmentStatusInProgress,
+			StartedAt: time.Now(),
+			Answers:   make([]models.UserAnswer, 0),
 		}
+		assessment, err = s.repo.CreateUserAssessment(newAssessment)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to create new assessment for userID %s", userID)
+			log.Printf("ERROR: [AssessmentService] %s: %v", errMsg, err)
+			return nil, nil, fmt.Errorf("%s: %w", errMsg, err)
+		}
+		log.Printf("INFO: [AssessmentService] Successfully created new assessment ID %d for userID '%s'", assessment.ID, userID)
 	} else {
-		log.Printf("用户 '%s' 继续进行中的评估，ID: %d, 当前记录的问题ID: %s", userID, assessment.ID, assessment.CurrentQuestionID)
+		log.Printf("INFO: [AssessmentService] User '%s' continues in-progress assessment ID %d, current question ID: '%s'", userID, assessment.ID, assessment.CurrentQuestionID)
 	}
 
-	// 确定下一个问题
 	var nextQuestionToShow *models.AssessmentQuestion
 
 	if assessment.Status == models.AssessmentStatusCompleted || assessment.Status == models.AssessmentStatusCancelled {
-		log.Printf("用户 '%s' 的评估 (ID: %d) 状态为 %s，不返回问题。", userID, assessment.ID, assessment.Status)
-		return nil, assessment, nil // 评估已结束，不返回问题
+		log.Printf("INFO: [AssessmentService] Assessment ID %d for userID '%s' has status '%s'. No further questions.", userID, assessment.ID, assessment.Status)
+		return nil, assessment, nil 
 	}
 
-	if assessment.CurrentQuestionID == "" { // 全新评估或上次未记录当前问题
+	if assessment.CurrentQuestionID == "" { 
 		if len(s.questions) > 0 {
-			nextQuestionToShow = &s.questions[0]
-			assessment.CurrentQuestionID = nextQuestionToShow.ID
+			nextQuestionToShow = &s.questions[0] 
+			// CurrentQuestionID will be set on the assessment object before saving below.
 		} else {
-			log.Println("错误: 评估服务中的问题列表为空！")
-			assessment.Status = models.AssessmentStatusCompleted // 异常情况
-			_, _ = s.repo.UpdateUserAssessment(assessment)       // 尝试更新状态
-			return nil, assessment, errors.New("系统错误：评估问卷未配置")
+			log.Printf("ERROR: [AssessmentService] Assessment question list is empty! Cannot determine first question for assessment ID %d.", assessment.ID)
+			assessment.Status = models.AssessmentStatusCompleted 
+			if _, updateErr := s.repo.UpdateUserAssessment(assessment); updateErr != nil {
+				log.Printf("ERROR: [AssessmentService] Failed to update assessment status to completed for assessmentID %d (empty question list): %v", assessment.ID, updateErr)
+			}
+			return nil, assessment, errors.New("internal system error: assessment questionnaire is not configured")
 		}
-	} else { // 有 CurrentQuestionID，判断是返回当前还是下一个
+	} else { 
 		currentQFromDef, exists := s.questionsByID[assessment.CurrentQuestionID]
 		if !exists {
-			log.Printf("错误: 评估 %d 的 CurrentQuestionID '%s' 在问卷定义中未找到！可能问卷已更新。将尝试从头开始。", assessment.ID, assessment.CurrentQuestionID)
+			log.Printf("WARN: [AssessmentService] CurrentQuestionID '%s' for assessment %d (userID '%s') not found in definitions! Questionnaire may have changed. Attempting to restart.", assessment.CurrentQuestionID, assessment.ID, userID)
 			if len(s.questions) > 0 {
 				nextQuestionToShow = &s.questions[0]
-				assessment.CurrentQuestionID = nextQuestionToShow.ID
-			} else { /* ... 同上，问卷为空的错误处理 ... */ 
-				return nil, assessment, errors.New("系统错误：评估问卷未配置")
+				// CurrentQuestionID will be set on assessment object before saving.
+			} else { 
+				log.Printf("ERROR: [AssessmentService] Assessment question list is empty when trying to handle missing CurrentQuestionID for assessment %d!", assessment.ID)
+				return nil, assessment, errors.New("internal system error: assessment questionnaire is not configured")
 			}
 		} else {
-			// 检查当前 CurrentQuestionID 是否已回答
 			answeredCurrent := false
 			for _, ans := range assessment.Answers {
 				if ans.QuestionID == assessment.CurrentQuestionID {
@@ -139,104 +145,108 @@ func (s *assessmentService) StartOrContinueAssessment(userID string) (*models.As
 				}
 			}
 
-			if answeredCurrent { // 如果 CurrentQuestionID 已回答，则找它的下一个问题
+			if answeredCurrent { 
 				foundCurrentInList := false
 				for i, qDef := range s.questions {
 					if qDef.ID == assessment.CurrentQuestionID {
 						foundCurrentInList = true
-						if i+1 < len(s.questions) { // 如果有下一个问题
+						if i+1 < len(s.questions) { 
 							nextQ := s.questions[i+1]
 							nextQuestionToShow = &nextQ
-							assessment.CurrentQuestionID = nextQ.ID
-						} else { // 是最后一个问题且已回答，则评估完成
+						} else { 
 							assessment.Status = models.AssessmentStatusCompleted
 							now := time.Now()
 							assessment.CompletedAt = &now
-							assessment.CurrentQuestionID = "" // 清空
+							// CurrentQuestionID will be cleared before saving for completed assessment.
 						}
 						break
 					}
 				}
-				if !foundCurrentInList { // 理论上不会发生，因为 currentQFromDef 已经找到了
-					log.Printf("严重错误: 在有序问题列表中未找到 CurrentQuestionID %s", assessment.CurrentQuestionID)
-					return nil, assessment, errors.New("系统内部错误，请联系管理员")
+				if !foundCurrentInList { 
+					log.Printf("CRITICAL: [AssessmentService] CurrentQuestionID %s (from assessment %d) not found in ordered question list, though it exists in questionsByID. This indicates a data inconsistency.", assessment.CurrentQuestionID, assessment.ID)
+					return nil, assessment, fmt.Errorf("internal system error processing assessment %d", assessment.ID)
 				}
-			} else { // 如果 CurrentQuestionID 未回答，则应该返回 CurrentQuestionID 本身
+			} else { 
 				nextQuestionToShow = currentQFromDef
-				// assessment.CurrentQuestionID 不需要改变
 			}
 		}
 	}
+	
+	// Update assessment.CurrentQuestionID based on nextQuestionToShow or completion
+	if assessment.Status == models.AssessmentStatusCompleted {
+		assessment.CurrentQuestionID = "" // Clear for completed
+	} else if nextQuestionToShow != nil {
+		assessment.CurrentQuestionID = nextQuestionToShow.ID
+	} // Else, if no next question and not completed (error case), CurrentQuestionID might remain as is or be cleared.
 
-	// 更新评估状态（主要是 CurrentQuestionID 和可能的 Status, CompletedAt）
-	updatedAssessment, err := s.repo.UpdateUserAssessment(assessment)
-	if err != nil {
-		log.Printf("为用户 '%s' 更新评估 %d 状态失败 (StartOrContinue): %v", userID, assessment.ID, err)
-		// 返回原始 assessment 和下一个问题（如果已确定），让上层决定如何处理
-		if nextQuestionToShow != nil {
-			return nextQuestionToShow, assessment, errors.New("处理评估进度时遇到问题，请稍后再试")
-		}
-		return nil, assessment, errors.New("处理评估进度时遇到问题，请稍后再试")
+	updatedAssessment, errUpdate := s.repo.UpdateUserAssessment(assessment)
+	if errUpdate != nil {
+		errMsg := fmt.Sprintf("failed to update assessment state for assessmentID %d, userID %s (StartOrContinue)", assessment.ID, userID)
+		log.Printf("ERROR: [AssessmentService] %s: %v", errMsg, errUpdate)
+		return nextQuestionToShow, assessment, fmt.Errorf("%s: %w", errMsg, errUpdate)
 	}
 
 	if updatedAssessment.Status == models.AssessmentStatusCompleted || updatedAssessment.Status == models.AssessmentStatusCancelled {
-		log.Printf("用户 '%s' 的评估 (ID: %d) 在 StartOrContinue 后状态为 %s。", userID, updatedAssessment.ID, updatedAssessment.Status)
-		return nil, updatedAssessment, nil // 没有下一个问题了
+		log.Printf("INFO: [AssessmentService] Assessment ID %d for userID '%s' has status '%s' after StartOrContinue logic. No next question.", updatedAssessment.ID, userID, updatedAssessment.Status)
+		return nil, updatedAssessment, nil
 	}
 	
-	if nextQuestionToShow == nil { // 如果逻辑走到这里 nextQuestionToShow 还是 nil，说明有问题
-	    log.Printf("错误: StartOrContinueAssessment 逻辑未能确定下一个问题，评估ID: %d", updatedAssessment.ID)
-	    return nil, updatedAssessment, errors.New("无法确定下一个评估问题，请重试或联系支持。")
+	if nextQuestionToShow == nil { 
+		log.Printf("ERROR: [AssessmentService] Logic failed to determine next question for assessmentID %d (userID: %s, status: %s). This indicates an unexpected state.", updatedAssessment.ID, userID, updatedAssessment.Status)
+		return nil, updatedAssessment, fmt.Errorf("internal error: unable to determine next assessment question for assessment %d", updatedAssessment.ID)
 	}
 
-	log.Printf("为用户 '%s' (评估ID: %d) 返回下一个问题: ID=%s", userID, updatedAssessment.ID, nextQuestionToShow.ID)
+	log.Printf("INFO: [AssessmentService] For userID '%s' (assessmentID %d), next question to show is ID '%s'.", userID, updatedAssessment.ID, nextQuestionToShow.ID)
 	return nextQuestionToShow, updatedAssessment, nil
 }
 
-
-// SubmitAnswer (逻辑已优化)
+// SubmitAnswer processes a user's answer to a question and determines the next step.
 func (s *assessmentService) SubmitAnswer(userID string, questionID string, answerValues []string) (*models.AssessmentQuestion, *models.UserAssessment, error) {
+	log.Printf("INFO: [AssessmentService] UserID '%s' submitting answer for questionID '%s'.", userID, questionID)
 	assessment, err := s.repo.GetUserAssessmentByUserID(userID, models.AssessmentStatusInProgress)
-	if err != nil || assessment == nil {
-		log.Printf("提交答案失败：用户 '%s' 没有正在进行的评估，或获取失败: %v", userID, err)
-		return nil, nil, errors.New("您当前没有正在进行的评估。如果想开始，请告诉我。")
+	if err != nil { 
+		errMsg := fmt.Sprintf("failed to retrieve in-progress assessment for userID %s when submitting answer", userID)
+		log.Printf("ERROR: [AssessmentService] %s: %v", errMsg, err)
+		return nil, nil, fmt.Errorf("%s: %w", errMsg, err)
+	}
+	if assessment == nil {
+		log.Printf("WARN: [AssessmentService] No in-progress assessment found for userID '%s' when submitting answer for questionID '%s'.", userID, questionID)
+		return nil, nil, errors.New("you do not have an assessment in progress. Would you like to start one?")
 	}
 
-	if assessment.CurrentQuestionID == "" && questionID == "q_welcome" {
-		// 特殊处理：如果 CurrentQuestionID 为空（可能是新评估刚开始），且提交的是对 q_welcome 的回答
-		log.Printf("用户 '%s' 提交对欢迎问题 '%s' 的回答。", userID, questionID)
-		assessment.CurrentQuestionID = questionID // 将当前问题设置为欢迎问题，以便后续逻辑正确处理
+	if assessment.CurrentQuestionID == "" && questionID == s.questions[0].ID { 
+		log.Printf("INFO: [AssessmentService] UserID '%s' submitting answer for first question '%s' with empty CurrentQuestionID. Setting CurrentQuestionID.", userID, questionID)
+		assessment.CurrentQuestionID = questionID 
 	} else if assessment.CurrentQuestionID != questionID {
-		log.Printf("警告: 用户 '%s' 尝试回答问题 '%s'，但当前应答问题是 '%s'", userID, questionID, assessment.CurrentQuestionID)
-		currentQ, exists := s.questionsByID[assessment.CurrentQuestionID]
-		if !exists || currentQ == nil { // 添加nil检查
-			log.Printf("错误：在SubmitAnswer中找不到当前应答问题定义 '%s'", assessment.CurrentQuestionID)
-			return nil, assessment, fmt.Errorf("系统错误：找不到您当前应该回答的问题。请尝试说“继续评估”。")
+		log.Printf("WARN: [AssessmentService] UserID '%s' attempted to answer question '%s', but current expected question is '%s' for assessmentID %d.", userID, questionID, assessment.CurrentQuestionID, assessment.ID)
+		currentQFromDef, exists := s.questionsByID[assessment.CurrentQuestionID]
+		if !exists || currentQFromDef == nil { 
+			log.Printf("ERROR: [AssessmentService] Current expected question definition '%s' not found for assessmentID %d.", assessment.CurrentQuestionID, assessment.ID)
+			return nil, assessment, fmt.Errorf("system error: current assessment question (ID: %s) not found. Please try starting the assessment again or contact support", assessment.CurrentQuestionID)
 		}
-		return currentQ, assessment, fmt.Errorf("您似乎回答了错误的问题。当前应该回答的是：'%s'", currentQ.Text)
+		return currentQFromDef, assessment, fmt.Errorf("you seem to be answering a previous question. The current question is: '%s'", currentQFromDef.Text)
 	}
 
 	questionDef, exists := s.questionsByID[questionID]
-	if !exists || questionDef == nil { // 添加nil检查
-		log.Printf("错误: 提交答案失败，问题ID '%s' 未在问卷定义中找到。", questionID)
-		return nil, assessment, errors.New("提交答案的问题无效，请重试")
+	if !exists || questionDef == nil { 
+		log.Printf("ERROR: [AssessmentService] Question definition for submitted questionID '%s' not found (assessmentID %d, userID %s).", questionID, assessment.ID, userID)
+		return nil, assessment, fmt.Errorf("invalid question ID '%s' submitted", questionID)
 	}
 
-	if questionDef.IsRequired && (answerValues == nil || len(answerValues) == 0 || (len(answerValues) == 1 && strings.TrimSpace(answerValues[0]) == "")) {
-		log.Printf("用户 '%s' 未回答必填问题 '%s'", userID, questionID)
-		return questionDef, assessment, errors.New("这个问题是必答的哦，请提供您的回答。")
+	if questionDef.IsRequired && (len(answerValues) == 0 || (len(answerValues) == 1 && strings.TrimSpace(answerValues[0]) == "")) {
+		log.Printf("INFO: [AssessmentService] UserID '%s' did not provide an answer for required question '%s' (assessmentID %d).", userID, questionID, assessment.ID)
+		return questionDef, assessment, errors.New("this question is required. Please provide an answer")
 	}
-	// ... (其他答案验证逻辑，如单选数量) ...
+	// TODO: Add more validation logic here (e.g., for single choice, ensure only one answer is provided; for multi-choice, ensure answers are from options).
 
-	// 特殊答案处理 (q_welcome, q_privacy_consent)
-	userVisibleError := processSpecialAnswers(assessment, questionDef, answerValues)
-	if userVisibleError != nil {
-		_, _ = s.repo.UpdateUserAssessment(assessment) // 保存状态变更 (如 cancelled)
-		return nil, assessment, userVisibleError
+	userVisibleMsg := processSpecialAnswers(assessment, questionDef, answerValues) 
+	if userVisibleMsg != nil {
+		if _, updateErr := s.repo.UpdateUserAssessment(assessment); updateErr != nil {
+			log.Printf("ERROR: [AssessmentService] Failed to update assessment %d for user %s after special answer processing (e.g. cancellation): %v", assessment.ID, userID, updateErr)
+		}
+		return nil, assessment, userVisibleMsg 
 	}
 
-
-	// 保存或更新答案
 	answerFound := false
 	for i, ans := range assessment.Answers {
 		if ans.QuestionID == questionID {
@@ -252,78 +262,97 @@ func (s *assessmentService) SubmitAnswer(userID string, questionID string, answe
 		})
 	}
 
-	// 确定下一个问题或完成
 	var nextQuestionToShow *models.AssessmentQuestion
 	currentIndexInList := -1
-	for i, q := range s.questions { // s.questions 是有序的
+	for i, q := range s.questions {
 		if q.ID == questionID {
 			currentIndexInList = i
 			break
 		}
 	}
 
-	if currentIndexInList == -1 { /* ... 内部错误 ... */ 
-	    return nil, assessment, errors.New("系统内部错误，无法定位问题顺序")
+	if currentIndexInList == -1 { 
+		log.Printf("CRITICAL: QuestionID %s (assessmentID %d) not found in ordered question list after successful answer submission. Data inconsistency.", questionID, assessment.ID)
+	    return nil, assessment, fmt.Errorf("internal system error processing question order for assessment %d", assessment.ID)
 	}
 
-	if currentIndexInList+1 < len(s.questions) {
+	if currentIndexInList+1 < len(s.questions) { 
 		nextQ := s.questions[currentIndexInList+1]
 		nextQuestionToShow = &nextQ
 		assessment.CurrentQuestionID = nextQ.ID
-		// Status 保持 InProgress
-	} else { // 已是最后一个问题
+	} else { 
 		assessment.Status = models.AssessmentStatusCompleted
 		now := time.Now()
 		assessment.CompletedAt = &now
-		assessment.CurrentQuestionID = "" // 清空
-		log.Printf("用户 '%s' 评估 (ID: %d) 已完成所有问题。", userID, assessment.ID)
+		assessment.CurrentQuestionID = "" 
+		log.Printf("INFO: [AssessmentService] AssessmentID %d for userID '%s' completed all questions.", assessment.ID, userID)
 	}
 
-	updatedAssessment, err := s.repo.UpdateUserAssessment(assessment)
-	if err != nil {
-		log.Printf("为用户 '%s' 更新评估 %d (提交答案 '%s' 后) 失败: %v", userID, assessment.ID, questionID, err)
-		return questionDef, assessment, errors.New("保存您的回答时遇到问题，请稍后再试")
+	// Note: `processSpecialAnswers` might have already changed `assessment.Status`.
+	// If status is now Cancelled, the next logic block for question progression might not be fully relevant,
+	// but saving the answer is still important.
+	updatedAssessment, errUpdate := s.repo.UpdateUserAssessment(assessment)
+	if errUpdate != nil {
+		errMsg := fmt.Sprintf("failed to update assessment %d for userID %s after submitting answer for questionID '%s'", assessment.ID, userID, questionID)
+		log.Printf("ERROR: [AssessmentService] %s: %v", errMsg, errUpdate)
+		return questionDef, assessment, fmt.Errorf("%s: %w", errMsg, errUpdate)
 	}
 
-	if updatedAssessment.Status == models.AssessmentStatusCompleted {
-		// triggerPostAssessmentActions(updatedAssessment) // 触发评估后动作
-		return nil, updatedAssessment, nil // 评估完成
+	if updatedAssessment.Status == models.AssessmentStatusCompleted || updatedAssessment.Status == models.AssessmentStatusCancelled {
+		log.Printf("INFO: [AssessmentService] Assessment %d for userID %s is now %s.", updatedAssessment.ID, userID, updatedAssessment.Status)
+		return nil, updatedAssessment, nil 
 	}
 
-	log.Printf("为用户 '%s' (评估ID: %d) 在回答问题 '%s' 后，返回下一个问题: ID=%s", userID, updatedAssessment.ID, questionID, nextQuestionToShow.ID)
+	// This state (nextQuestionToShow being nil when assessment is not completed/cancelled) should ideally not be reached.
+	if nextQuestionToShow == nil { 
+	    log.Printf("ERROR: [AssessmentService] Next question is unexpectedly nil for assessment %d (userID: %s, status: %s) after answering %s. This indicates a logic error.", updatedAssessment.ID, userID, updatedAssessment.Status, questionID)
+	    return nil, updatedAssessment, fmt.Errorf("internal error: failed to determine next question for assessment %d", updatedAssessment.ID)
+	}
+	log.Printf("INFO: [AssessmentService] For userID '%s' (assessmentID %d), after answering '%s', next question to show is '%s'.", userID, updatedAssessment.ID, questionID, nextQuestionToShow.ID)
 	return nextQuestionToShow, updatedAssessment, nil
 }
 
-// processSpecialAnswers 处理特殊答案并可能修改评估状态，返回用户可见的错误/消息
+// processSpecialAnswers handles answers to questions that might alter assessment flow (e.g., cancellation).
+// It modifies the assessment status directly if needed and returns a user-facing error message if applicable.
 func processSpecialAnswers(assessment *models.UserAssessment, question *models.AssessmentQuestion, answerValues []string) error {
-	if question.ID == "q_welcome" && contains(answerValues, "不了，下次吧") {
+	if question.ID == "q_welcome" && contains(answerValues, "No, next time") { // Matched English option
 		assessment.Status = models.AssessmentStatusCancelled
-		assessment.CurrentQuestionID = ""
-		log.Printf("用户 '%s' 在欢迎问题选择“不了，下次吧”，评估ID %d 取消。", assessment.UserID, assessment.ID)
-		return errors.New("好的，我们尊重您的选择。如果您之后改变主意，可以随时重新开始评估。")
+		assessment.CurrentQuestionID = "" 
+		log.Printf("INFO: [AssessmentService] UserID '%s' chose 'No, next time' for welcome question. AssessmentID %d cancelled.", assessment.UserID, assessment.ID)
+		return errors.New("Okay, we respect your choice. You can restart the assessment anytime if you change your mind.") 
 	}
-	if question.ID == "q_privacy_consent" && contains(answerValues, "我不同意") {
+	if question.ID == "q_privacy_consent" && contains(answerValues, "I do not agree") { // Matched English option
 		assessment.Status = models.AssessmentStatusCancelled
-		assessment.CurrentQuestionID = ""
-		log.Printf("用户 '%s' 不同意隐私条款，评估ID %d 取消。", assessment.UserID, assessment.ID)
-		return errors.New("我们非常重视您的隐私。如果您不同意处理您的信息，我们将无法进行后续的个性化服务。评估已中止。")
+		assessment.CurrentQuestionID = "" 
+		log.Printf("INFO: [AssessmentService] UserID '%s' did not consent to privacy terms. AssessmentID %d cancelled.", assessment.UserID, assessment.ID)
+		return errors.New("We take your privacy very seriously. If you do not agree to the processing of your information, we cannot proceed with personalized services. The assessment has been discontinued.") 
 	}
 	return nil
 }
 
-
-// GetAssessmentResult (保持不变)
+// GetAssessmentResult retrieves a completed assessment for a user.
 func (s *assessmentService) GetAssessmentResult(userID string) (*models.UserAssessment, error) {
-	// ... (实现)
-	assessment, err := s.repo.GetUserAssessmentByUserID(userID, models.AssessmentStatusCompleted)
-	if err != nil || assessment == nil {
-		log.Printf("获取用户 '%s' 已完成的评估结果失败: %v", userID, err)
-		return nil, errors.New("您尚未完成任何评估，或获取结果时发生错误。")
+	if userID == "" {
+		log.Println("WARN: [AssessmentService] GetAssessmentResult called with empty userID.")
+		return nil, errors.New("userID cannot be empty")
 	}
+	log.Printf("INFO: [AssessmentService] Attempting to get completed assessment result for userID: %s", userID)
+	
+	assessment, err := s.repo.GetUserAssessmentByUserID(userID, models.AssessmentStatusCompleted)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to get completed assessment for userID %s from repository", userID)
+		log.Printf("ERROR: [AssessmentService] %s: %v", errMsg, err)
+		return nil, fmt.Errorf("%s: %w", errMsg, err)
+	}
+	if assessment == nil { 
+		log.Printf("INFO: [AssessmentService] No completed assessment found for userID '%s'.", userID)
+		return nil, nil 
+	}
+	log.Printf("INFO: [AssessmentService] Successfully retrieved completed assessment ID %d for userID '%s'.", assessment.ID, userID)
 	return assessment, nil
 }
 
-// contains (保持不变)
+// contains is a helper function to check if a string slice contains a specific item.
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {

@@ -4,20 +4,20 @@ import (
 	"time"
 )
 
-// ChatMessage 聊天消息模型
+// ChatMessage represents a message in a chat.
 type ChatMessage struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	UserID    string    `json:"user_id" gorm:"index"` // 增加 gorm:"index" 提高查询效率
-	Role      string    `json:"role"`               // "user", "assistant", "system"
-	Name      string    `json:"name"`               // 发送者名称 (用户ID/昵称, 或 AI Agent 的名字)
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
+	UserID    string    `json:"user_id" gorm:"index"` // Added gorm:"index" for query efficiency
+	Role      string    `json:"role"`               // Role of the message sender, e.g., "user", "assistant", "system"
+	Name      string    `json:"name"`               // Name of the sender (UserID/nickname, or AI Agent's name)
+	Content   string    `json:"content"`            // Content of the message
+	Timestamp time.Time `json:"timestamp"`          // Timestamp when the message was recorded
 }
 
-// ChatResponse (当前未使用，可以保留或移除)
+// ChatResponse (Currently unused, can be kept for future use or removed if deemed unnecessary)
 // type ChatResponse struct {
 // 	ID        uint      `json:"id" gorm:"primaryKey"`
-// 	MessageID uint      `json:"message_id"`
-// 	Content   string    `json:"content"`
-// 	Timestamp time.Time `json:"timestamp"`
+// 	MessageID uint      `json:"message_id"` // ID of the original ChatMessage this might be a response to
+// 	Content   string    `json:"content"`    // Content of the response
+// 	Timestamp time.Time `json:"timestamp"`  // Timestamp of the response
 // }

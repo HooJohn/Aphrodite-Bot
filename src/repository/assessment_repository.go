@@ -40,7 +40,8 @@ func (r *assessmentRepository) CreateUserAssessment(assessment *models.UserAsses
 	defer r.muAssessments.Unlock()
 
 	if assessment.UserID == "" {
-		return nil, errors.New("用户ID不能为空")
+		log.Printf("ERROR: [AssessmentRepository] CreateUserAssessment: UserID cannot be empty.")
+		return nil, errors.New("user ID cannot be empty")
 	}
 
 	assessment.ID = r.nextAssessmentID
@@ -56,9 +57,9 @@ func (r *assessmentRepository) CreateUserAssessment(assessment *models.UserAsses
 	}
 
 	r.userAssessments[assessment.ID] = assessment
-	r.userIndex[assessment.UserID] = append(r.userIndex[assessment.UserID], assessment.ID) // 更新用户索引
+	r.userIndex[assessment.UserID] = append(r.userIndex[assessment.UserID], assessment.ID)
 
-	log.Printf("创建用户评估成功: ID=%d, UserID=%s, Status=%s", assessment.ID, assessment.UserID, assessment.Status)
+	log.Printf("INFO: [AssessmentRepository] Created user assessment: ID=%d, UserID=%s, Status=%s", assessment.ID, assessment.UserID, assessment.Status)
 	return assessment, nil
 }
 
@@ -69,8 +70,10 @@ func (r *assessmentRepository) GetUserAssessmentByID(id uint) (*models.UserAsses
 
 	assessment, exists := r.userAssessments[id]
 	if !exists {
-		return nil, fmt.Errorf("未找到ID为 %d 的用户评估记录", id)
+		log.Printf("WARN: [AssessmentRepository] GetUserAssessmentByID: Assessment with ID %d not found.", id)
+		return nil, fmt.Errorf("assessment record with ID %d not found", id)
 	}
+	log.Printf("INFO: [AssessmentRepository] Retrieved assessment ID %d.", id)
 	return assessment, nil
 }
 
@@ -81,7 +84,8 @@ func (r *assessmentRepository) GetUserAssessmentByUserID(userID string, statusFi
 
 	assessmentIDs, userExists := r.userIndex[userID]
 	if !userExists || len(assessmentIDs) == 0 {
-		return nil, fmt.Errorf("用户 '%s' 没有任何评估记录", userID)
+		log.Printf("INFO: [AssessmentRepository] GetUserAssessmentByUserID: No assessment records found for userID '%s'.", userID)
+		return nil, nil // Changed to return nil, nil for not found, service layer will interpret
 	}
 
 	var latestMatchingAssessment *models.UserAssessment
@@ -92,24 +96,22 @@ func (r *assessmentRepository) GetUserAssessmentByUserID(userID string, statusFi
 		targetStatus = string(statusFilter[0]) // 将 models.UserAssessmentStatus 转为 string
 	}
 
-	for i := len(assessmentIDs) - 1; i >= 0; i-- { // 从后向前遍历，更有可能先找到最新的
+	for i := len(assessmentIDs) - 1; i >= 0; i-- { 
 		assessmentID := assessmentIDs[i]
 		assessment, exists := r.userAssessments[assessmentID]
-		if !exists { // 理论上不应该发生，索引和主数据应一致
-			log.Printf("警告: 用户索引中的评估ID %d 在主数据中未找到 (UserID: %s)", assessmentID, userID)
-			continue
+		if !exists {
+			log.Printf("ERROR: [AssessmentRepository] Data inconsistency: AssessmentID %d found in userIndex for userID '%s' but not in main userAssessments map.", assessmentID, userID)
+			continue 
 		}
 
-		if targetStatus != "" { // 如果指定了状态过滤
-			if string(assessment.Status) == targetStatus { // 状态匹配
-				// 如果是查找特定状态，通常我们期望的是该状态下最新的一个（按UpdatedAt或CreatedAt）
-				// 或者业务上只允许一个特定状态的评估存在
+		if targetStatus != "" { 
+			if string(assessment.Status) == targetStatus { 
 				if latestMatchingAssessment == nil || assessment.UpdatedAt.After(latestTimestamp) {
 					latestMatchingAssessment = assessment
 					latestTimestamp = assessment.UpdatedAt
 				}
 			}
-		} else { // 如果没有指定状态过滤，则找该用户最新的评估（无论状态）
+		} else { 
 			if latestMatchingAssessment == nil || assessment.UpdatedAt.After(latestTimestamp) {
 				latestMatchingAssessment = assessment
 				latestTimestamp = assessment.UpdatedAt
@@ -118,13 +120,11 @@ func (r *assessmentRepository) GetUserAssessmentByUserID(userID string, statusFi
 	}
 
 	if latestMatchingAssessment == nil {
-		if targetStatus != "" {
-			return nil, fmt.Errorf("未找到用户 '%s' 状态为 '%s' 的评估记录", userID, targetStatus)
-		}
-		return nil, fmt.Errorf("用户 '%s' 没有符合条件的评估记录", userID) // 理论上如果userIndex有记录，这里应该能找到至少一个
+		log.Printf("INFO: [AssessmentRepository] GetUserAssessmentByUserID: No assessment found for userID '%s' with status filter '%s'.", userID, targetStatus)
+		return nil, nil // Changed to return nil, nil for not found
 	}
 	
-	log.Printf("为用户 '%s' 找到评估记录 ID: %d, Status: %s (Filter: '%s')", userID, latestMatchingAssessment.ID, latestMatchingAssessment.Status, targetStatus)
+	log.Printf("INFO: [AssessmentRepository] Retrieved assessment ID %d (Status: %s) for userID '%s' (Filter: '%s').", latestMatchingAssessment.ID, latestMatchingAssessment.Status, userID, targetStatus)
 	return latestMatchingAssessment, nil
 }
 
@@ -133,19 +133,19 @@ func (r *assessmentRepository) UpdateUserAssessment(assessment *models.UserAsses
 	r.muAssessments.Lock()
 	defer r.muAssessments.Unlock()
 
-	_, exists := r.userAssessments[assessment.ID]
+	originalAssessment, exists := r.userAssessments[assessment.ID]
 	if !exists {
-		return nil, fmt.Errorf("更新失败：未找到ID为 %d 的用户评估记录", assessment.ID)
+		log.Printf("WARN: [AssessmentRepository] UpdateUserAssessment: Assessment with ID %d not found.", assessment.ID)
+		return nil, fmt.Errorf("update failed: assessment record with ID %d not found", assessment.ID)
 	}
 
-	// UserID 和 StartedAt, CreatedAt 通常不应被外部更新
-	originalAssessment := r.userAssessments[assessment.ID]
+	// Preserve immutable fields
 	assessment.UserID = originalAssessment.UserID
 	assessment.StartedAt = originalAssessment.StartedAt
 	assessment.CreatedAt = originalAssessment.CreatedAt
-	assessment.UpdatedAt = time.Now() // 确保更新时间被设置
+	assessment.UpdatedAt = time.Now() // Ensure update time is set
 
-	r.userAssessments[assessment.ID] = assessment // 直接用传入的 assessment 替换（已处理不可变字段）
-	log.Printf("更新用户评估成功: ID=%d, UserID=%s, Status=%s", assessment.ID, assessment.UserID, assessment.Status)
+	r.userAssessments[assessment.ID] = assessment
+	log.Printf("INFO: [AssessmentRepository] Updated user assessment: ID=%d, UserID=%s, Status=%s", assessment.ID, assessment.UserID, assessment.Status)
 	return assessment, nil
 }
