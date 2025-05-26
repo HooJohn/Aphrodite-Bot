@@ -2,72 +2,81 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 
 	"project/models"
 )
 
-// ChatRepository 聊天仓库接口 (保持不变)
+// ChatRepository defines the interface for chat message storage.
 type ChatRepository interface {
 	SaveMessage(message models.ChatMessage) error
 	GetMessagesByUserID(userID string) ([]models.ChatMessage, error)
 }
 
-// chatRepository 聊天仓库实现
+// chatRepository is an in-memory implementation of ChatRepository.
+// It stores messages indexed by UserID for efficient retrieval.
 type chatRepository struct {
-	messages map[string][]models.ChatMessage // 修改：按 UserID 存储消息列表，提高查询效率
+	messages map[string][]models.ChatMessage // Stores lists of messages per UserID
 	mu       sync.RWMutex
-	// nextMessageID uint // 如果需要全局唯一的 message ID (跨用户)，可以保留。但通常 message ID 在用户级别内自增或由DB生成。
-	// 当前 models.ChatMessage.ID 是 uint，我们会在 SaveMessage 中处理它，使其在用户级别内唯一。
+	// nextMessageID uint // If a globally unique message ID (across users) were needed, this could be used.
+	// Currently, models.ChatMessage.ID is a uint, and SaveMessage handles making it unique within the user's message list.
 }
 
-// NewChatRepository 创建聊天仓库实例
+// NewChatRepository creates an instance of the in-memory chat repository.
 func NewChatRepository() ChatRepository {
 	return &chatRepository{
 		messages: make(map[string][]models.ChatMessage),
-		// nextMessageID: 1,
 	}
 }
 
-// SaveMessage 保存消息
+// SaveMessage saves a chat message to the in-memory store.
+// It assigns a new ID to the message, specific to the user's message sequence.
 func (r *chatRepository) SaveMessage(message models.ChatMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if message.UserID == "" {
-		return errors.New("保存消息失败：UserID 不能为空")
+		log.Println("ERROR: [ChatRepository] SaveMessage: UserID cannot be empty.")
+		return errors.New("failed to save message: UserID cannot be empty")
 	}
 
 	userMessages := r.messages[message.UserID]
-	message.ID = uint(len(userMessages) + 1) // 在该用户的消息列表内ID自增
+	message.ID = uint(len(userMessages) + 1) // Assign ID incrementally within the user's message list
 	
 	r.messages[message.UserID] = append(userMessages, message)
 
-	log.Printf("消息已保存到内存仓库: UserID=%s, MsgID=%d, Role=%s, Name=%s, Content='%.30s...'", message.UserID, message.ID, message.Role, message.Name, message.Content)
+	log.Printf("INFO: [ChatRepository] Message saved to in-memory store: UserID=%s, MsgID=%d, Role=%s, Name=%s, Content='%.30s...'", 
+		message.UserID, message.ID, message.Role, message.Name, message.Content)
 	return nil
 }
 
-// GetMessagesByUserID 根据用户ID获取消息
+// GetMessagesByUserID retrieves all messages for a given user ID from the in-memory store.
+// It returns an empty slice and no error if the user has no messages or does not exist.
 func (r *chatRepository) GetMessagesByUserID(userID string) ([]models.ChatMessage, error) {
+	if userID == "" {
+		log.Println("WARN: [ChatRepository] GetMessagesByUserID: UserID cannot be empty.")
+		// Returning error for empty userID, though service layer should ideally prevent this.
+		return nil, errors.New("userID cannot be empty when fetching messages")
+	}
+	
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	userMessages, exists := r.messages[userID]
 	if !exists || len(userMessages) == 0 {
-		// 返回空切片和nil错误，表示用户存在但没有消息，或用户根本没有记录。
-		// ChatHandler 中对 "未找到该用户的消息" 的错误检查需要调整，或者这里返回特定错误。
-		// 为了与之前的约定一致，如果希望上层检查特定错误字符串：
-		// return nil, errors.New("未找到该用户的消息")
-		// 但通常，没有消息不应该是一个错误，而是一个空结果。
-		log.Printf("用户 '%s' 没有聊天记录或用户不存在于内存仓库中", userID)
-		return []models.ChatMessage{}, nil // 返回空切片，表示没有消息
+		// This behavior (empty slice, nil error for not found) is intentional.
+		// It indicates either the user exists with no messages, or the user has no record yet.
+		// Service layer can interpret this as "no history".
+		log.Printf("INFO: [ChatRepository] No chat history found for UserID '%s' in in-memory store, or user does not exist.", userID)
+		return []models.ChatMessage{}, nil // Return empty slice, not an error
 	}
 
-	// 返回副本以避免外部修改内部存储
+	// Return a copy to prevent external modification of the internal store
 	result := make([]models.ChatMessage, len(userMessages))
 	copy(result, userMessages)
 
-	log.Printf("从内存仓库为用户 '%s' 获取了 %d 条消息", userID, len(result))
+	log.Printf("INFO: [ChatRepository] Retrieved %d messages for UserID '%s' from in-memory store.", len(result), userID)
 	return result, nil
 }

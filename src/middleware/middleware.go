@@ -1,60 +1,65 @@
 package middleware
 
 import (
+	"fmt"
+	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Logger 日志中间件
+// Logger is a Gin middleware for logging HTTP requests and responses.
 func Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 开始时间
+		// Start timer
 		startTime := time.Now()
 
-		// 处理请求
+		// Process request
 		c.Next()
 
-		// 结束时间
-		endTime := time.Now()
+		// End timer
+		latency := time.Since(startTime)
 
-		// 执行时间
-		latencyTime := endTime.Sub(startTime)
-
-		// 请求方式
-		reqMethod := c.Request.Method
-
-		// 请求路由
-		reqURI := c.Request.RequestURI
-
-		// 状态码
+		// Request details
+		method := c.Request.Method
+		uri := c.Request.RequestURI
 		statusCode := c.Writer.Status()
-
-		// 请求IP
 		clientIP := c.ClientIP()
+		// Get errors written by subsequent handlers
+		errorsStr := c.Errors.ByType(gin.ErrorTypePrivate).String()
+		if errorsStr == "" {
+			errorsStr = "None"
+		}
+		
+		// Set header for response time
+		c.Writer.Header().Set("X-Response-Time", latency.String())
 
-		// 日志格式
-		c.Writer.Header().Set("X-Response-Time", latencyTime.String())
-
-		// 打印日志
-		gin.DefaultWriter.Write([]byte("[GIN] " + time.Now().Format("2006-01-02 15:04:05") +
-			" | " + clientIP + " | " + reqMethod + " | " +
-			reqURI + " | " + c.Errors.String() + " | " +
-			time.Since(startTime).String() + " | Status: " +
-			string(statusCode) + "\n"))
+		// Log format (using standard log package for consistency with other app logs)
+		// Using [GIN] prefix similar to Gin's default logger, but with more structure.
+		log.Printf("[GIN] %s | %3d | %13v | %15s | %-7s %s\n      Errors: %s",
+			startTime.Format("2006/01/02 - 15:04:05"),
+			statusCode,
+			latency,
+			clientIP,
+			method,
+			uri,
+			errorsStr,
+		)
 	}
 }
 
-// Cors 跨域中间件
+// Cors is a Gin middleware for enabling Cross-Origin Resource Sharing (CORS).
+// It allows requests from any origin.
 func Cors() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*") // Allow all origins
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, User-Agent") // Added User-Agent
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH") // Added PATCH
 
+		// Handle preflight requests (OPTIONS)
 		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+			c.AbortWithStatus(204) // No Content
 			return
 		}
 
