@@ -1,5 +1,5 @@
 #!/bin/bash
-export DASHSCOPE_API_KEY=your_aliyun_api_key
+export DASHSCOPE_API_KEY=sk-fppjtthlkjysvpqkrsmllcgbdmazosjiruaskoqpmflgzvcg
 export ARK_API_KEY=your_huoshan_api_key
 export HUNYUAN_API_KEY1=your_tencent_api_key
 export GLM_API_KEY=your_zhipuai_api_key

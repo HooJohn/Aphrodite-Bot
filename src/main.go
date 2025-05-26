@@ -42,6 +42,6 @@ func registerRoutes(r *gin.Engine) {
 		// 聊天相关接口
 		apiGroup.POST("/chat", api.ChatHandler)
 		// 调度相关接口
-		apiGroup.POST("/scheduler", api.SchedulerHandler)
+		//apiGroup.POST("/scheduler", api.SchedulerHandler)
 	}
 }
