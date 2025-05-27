@@ -25,9 +25,10 @@ type APIHandler struct {
 	assessmentService services.AssessmentService
 	schedulerService  services.SchedulerService
 	chatService      services.ChatService
-	planRepo         repository.PlanRepository // Added PlanRepository
-	planService      services.PlanService      // Added PlanService
-	db               *gorm.DB                  // If direct DB access is needed by handlers
+	planRepo         repository.PlanRepository 
+	planService      services.PlanService      
+	progressService  services.ProgressService  // Added ProgressService
+	db               *gorm.DB                  
 }
 
 // NewAPIHandler creates a new APIHandler with necessary dependencies.
@@ -39,18 +40,20 @@ func NewAPIHandler(
 	assessmentService services.AssessmentService,
 	schedulerService services.SchedulerService,
 	chatService services.ChatService,
-	planService services.PlanService, // Added PlanService
+	planService services.PlanService, 
+	progressService services.ProgressService, // Added ProgressService
 	db *gorm.DB,
 ) *APIHandler {
 	return &APIHandler{
 		chatRepo:         chatRepo,
 		assessmentRepo:   assessmentRepo,
 		quotaRepo:        quotaRepo,
-		planRepo:         planRepo, // Store PlanRepository
+		planRepo:         planRepo, 
 		assessmentService: assessmentService,
 		schedulerService:  schedulerService,
 		chatService:      chatService,
-		planService:      planService, // Store PlanService
+		planService:      planService, 
+		progressService:  progressService, // Store ProgressService
 		db:               db,
 	}
 }
@@ -574,6 +577,77 @@ func parseUint(s string) (uint, error) {
 
 
 // --- Existing helper functions from ChatHandler logic ---
+
+// --- Progress Report Handler ---
+
+// GetProgressReportHandler handles requests to fetch a user's progress report.
+// GET /api/progress/report/:userID?period=last_7_days&reference_date=YYYY-MM-DD
+func (h *APIHandler) GetProgressReportHandler(c *gin.Context) {
+	userID := c.Param("userID")
+	if userID == "" {
+		utils.SendJSONError(c, http.StatusBadRequest, "UserID path parameter is required.", nil)
+		return
+	}
+
+	period := c.DefaultQuery("period", "last_7_days")
+	referenceDateStr := c.Query("reference_date") // Optional
+
+	// Validate period (optional, can be done in service too)
+	allowedPeriods := map[string]bool{"last_7_days": true, "last_30_days": true} // Add more if supported
+	if !allowedPeriods[period] {
+		// If you want to support custom_range, you'd also need startDate and endDate query params
+		// and potentially more validation here or in the service.
+		// For now, only specific period types are allowed.
+		utils.SendJSONError(c, http.StatusBadRequest, fmt.Sprintf("Invalid period type. Allowed values: %v", getKeys(allowedPeriods)), nil)
+		return
+	}
+	
+	// Validate referenceDateStr if provided (basic format check)
+	if referenceDateStr != "" {
+		_, err := time.Parse("2006-01-02", referenceDateStr)
+		if err != nil {
+			utils.SendJSONError(c, http.StatusBadRequest, "Invalid reference_date format. Please use YYYY-MM-DD.", err)
+			return
+		}
+	}
+	
+	if h.progressService == nil {
+		utils.SendJSONError(c, http.StatusInternalServerError, "System configuration error.", errors.New("progressservice not initialized"))
+		return
+	}
+
+	report, err := h.progressService.GenerateProgressReport(userID, period, referenceDateStr)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") { // Example: if service returns specific "not found" errors for user/data
+			utils.SendJSONError(c, http.StatusNotFound, "Progress report data not found for the user or period.", err)
+		} else {
+			utils.SendJSONError(c, http.StatusInternalServerError, "Failed to generate progress report.", err)
+		}
+		return
+	}
+
+	if report == nil { // Should be caught by error handling in service, but as a safeguard
+		utils.SendJSONError(c, http.StatusNotFound, "Progress report data not available.", nil)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    200,
+		"message": "Progress report generated successfully",
+		"data":    report,
+	})
+}
+
+// Helper function to get keys from a map for error messages
+func getKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+
 func getAvailableAIs(groupID string, appCfg config.Config) []*config.LLMCharacter {
 	var availableAIs []*config.LLMCharacter
 	targetGroupID := groupID

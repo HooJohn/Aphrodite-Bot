@@ -43,6 +43,7 @@ func main() {
 	schedulerService := services.NewSchedulerService(assessmentRepo) 
 	chatService := services.NewChatService(chatRepo)                 
 	planService := services.NewPlanService(planRepo, assessmentRepo) 
+	progressSvc := services.NewProgressService(planRepo) // Initialize ProgressService
 	log.Println("INFO: [Main] Services initialized.")
 
 	// Initialize API Handler with all dependencies
@@ -55,6 +56,7 @@ func main() {
 		schedulerService,
 		chatService,
 		planService, 
+		progressSvc, // Pass ProgressService
 		db,          
 	)
 	log.Println("INFO: [Main] API Handler initialized.")
@@ -121,6 +123,12 @@ func registerRoutes(r *gin.Engine, handler *api.APIHandler) {
 			planGroup.GET("/:planID", handler.GetPlanDetailsHandler)             
 			planGroup.POST("/task/:taskID/complete", handler.CompleteTaskHandler) 
 			planGroup.POST("/task/:taskID/skip", handler.SkipTaskHandler)         
+		}
+
+		// Progress Report endpoint
+		progressGroup := apiGroup.Group("/progress")
+		{
+			progressGroup.GET("/report/:userID", handler.GetProgressReportHandler) // GET /api/progress/report/:userID
 		}
 		// Example for a scheduler-specific endpoint if needed in future
 		// schedulerGroup := apiGroup.Group("/scheduler")
